@@ -132,13 +132,15 @@ const NodeCard = ({
 );
 
 const ChartContainer = ({ title, children, icon: Icon }: { title: string, children: React.ReactNode, icon?: any }) => (
-  <div className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 h-full flex flex-col">
+  <div className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 h-[280px] flex flex-col">
     <div className="flex items-center gap-2 mb-4">
       {Icon && <Icon size={14} className="text-[#0ea5e9]" />}
       <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">{title}</h3>
     </div>
-    <div className="flex-1 min-h-[180px]">
-      {children}
+    <div className="flex-1 relative">
+      <div className="absolute inset-0">
+        {children}
+      </div>
     </div>
   </div>
 );
@@ -150,45 +152,89 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
+  const [syncError, setSyncError] = useState(false);
   
   const fetchData = async () => {
+    console.log("--- FETCHING TELEMETRY ---");
     try {
-      const [envRes, vitalsRes] = await Promise.all([
+      setSyncError(false);
+      // 1. Handle APIs independently (Remove all-or-nothing failure)
+      const [envRes, vitalsRes] = await Promise.allSettled([
         fetch(`${BASE_URL}/api/environment`),
         fetch(`${BASE_URL}/api/vitals`)
       ]);
 
-      if (!envRes.ok || !vitalsRes.ok) throw new Error('Uplink failure');
+      let envJson: any = null;
+      let vitalsJson: any = null;
 
-      const envData: EnvironmentData = await envRes.json();
-      const vitalsData: VitalsData = await vitalsRes.json();
+      if (envRes.status === 'fulfilled' && envRes.value.ok) {
+        try {
+          envJson = await envRes.value.json();
+        } catch (e) {
+          console.error("Failed to parse Environment JSON:", e);
+        }
+      } else {
+        console.warn("Environment API failed or returned error", envRes);
+      }
 
-      setEnv(envData);
-      setVitals(vitalsData);
-      setLoading(false);
+      if (vitalsRes.status === 'fulfilled' && vitalsRes.value.ok) {
+        try {
+          vitalsJson = await vitalsRes.value.json();
+        } catch (e) {
+          console.error("Failed to parse Vitals JSON:", e);
+        }
+      } else {
+        console.warn("Vitals API failed or returned error", vitalsRes);
+      }
+
+      // 2. Handle Array vs Object response (CRITICAL)
+      const envData = envJson ? (Array.isArray(envJson) ? envJson : [envJson]) : [];
+      const vitalsData = vitalsJson ? (Array.isArray(vitalsJson) ? vitalsJson : [vitalsJson]) : [];
+
+      // 5. Debug Logs
+      console.log("ENV DATA:", envData);
+      console.log("VITALS DATA:", vitalsData);
+
+      const latestEnv = envData.length > 0 ? envData[0] : null;
+      const latestVitals = vitalsData.length > 0 ? vitalsData[0] : null;
+
+      if (latestEnv) setEnv(latestEnv);
+      if (latestVitals) setVitals(latestVitals);
       
-      // Update history for graphs
+      // 3. Ensure history state is ALWAYS updated (even with partial data)
+      // 4. Force numeric values
       setHistory(prev => {
-        const newPoint = {
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          temp: envData.temperature,
-          gas: envData.mq135_ppm,
-          heart: vitalsData.heart_rate,
-          breath: vitalsData.breath_rate
+        const parseNum = (val: any, fallback: number) => {
+          const n = Number(val);
+          return isNaN(n) ? fallback : n;
         };
-        const updated = [...prev, newPoint].slice(-15);
+
+        const newPoint: HistoryPoint = {
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          temp: latestEnv ? parseNum(latestEnv.temperature, (prev.length > 0 ? prev[prev.length - 1].temp : 0)) : (prev.length > 0 ? prev[prev.length - 1].temp : 0),
+          gas: latestEnv ? parseNum(latestEnv.mq135_ppm, (prev.length > 0 ? prev[prev.length - 1].gas : 0)) : (prev.length > 0 ? prev[prev.length - 1].gas : 0),
+          heart: latestVitals ? parseNum(latestVitals.heart_rate, (prev.length > 0 ? prev[prev.length - 1].heart : 0)) : (prev.length > 0 ? prev[prev.length - 1].heart : 0),
+          breath: latestVitals ? parseNum(latestVitals.breath_rate, (prev.length > 0 ? prev[prev.length - 1].breath : 0)) : (prev.length > 0 ? prev[prev.length - 1].breath : 0)
+        };
+        const updated = [...prev, newPoint].slice(-20);
+        console.log("HISTORY UPDATED, COUNT:", updated.length, "LATEST:", newPoint);
         return updated;
       });
 
       // Simple alert log logic
-      if (envData.mq135_ppm > 400) {
-        addLog('ALERT', `High gas concentration detected: ${envData.mq135_ppm} ppm`, 'danger');
+      if (latestEnv && Number(latestEnv.mq135_ppm) > 400) {
+        addLog('ALERT', `High gas concentration detected: ${latestEnv.mq135_ppm} ppm`, 'danger');
       }
-      if (vitalsData.human_detected === 1) {
+      if (latestVitals && Number(latestVitals.human_detected) === 1) {
         addLog('SYSTEM', 'Human presence detected in restricted zone', 'warning');
       }
     } catch (error) {
       console.error("Telemetry Sync Error:", error);
+      setSyncError(true);
+    } finally {
+      setLoading(false);
+      setLastSync(new Date());
     }
   };
 
@@ -243,20 +289,22 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-4">
-            <div className="bg-[#0ea5e9]/5 border border-[#0ea5e9]/20 px-4 py-2 rounded-xl hidden sm:block">
+            <div className={`bg-[#0d1117] border ${syncError ? 'border-red-500/30' : 'border-[#30363d]'} px-4 py-2 rounded-xl hidden sm:block`}>
               <div className="flex items-center gap-2 mb-0.5">
-                <Zap size={10} className="text-[#0ea5e9]" />
-                <p className="text-[8px] font-black text-[#0ea5e9] uppercase tracking-widest">Uplink Status</p>
+                <span className={`w-1.5 h-1.5 rounded-full ${syncError ? 'bg-red-500' : 'bg-emerald-500'} animate-pulse`}></span>
+                <p className={`text-[8px] font-black ${syncError ? 'text-red-500' : 'text-emerald-500'} uppercase tracking-widest`}>
+                  {syncError ? 'Uplink Offline' : 'Uplink Active'}
+                </p>
               </div>
-              <p className="text-[9px] leading-tight text-slate-400 font-bold font-mono">
-                {BASE_URL.replace('https://', '')} // ACTIVE
+              <p className="text-[9px] leading-tight text-slate-500 font-bold font-mono">
+                Last Sync: {lastSync ? lastSync.toLocaleTimeString() : 'Never'}
               </p>
             </div>
             <button 
               onClick={fetchData}
               className="p-2.5 rounded-lg bg-slate-900 border border-[#30363d] text-slate-400 hover:text-white hover:border-[#0ea5e9]/50 transition-all"
             >
-              <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+              <RefreshCw size={16} className={loading ? 'animate-spin text-[#0ea5e9]' : ''} />
             </button>
           </div>
         </header>
@@ -279,11 +327,11 @@ const App: React.FC = () => {
                   <div className="flex justify-between items-end">
                     <div>
                       <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Temperature</p>
-                      <p className="text-2xl font-mono font-bold text-white">{env?.temperature ?? '--'}<span className="text-xs text-slate-500 ml-1">°C</span></p>
+                      <p className="text-2xl font-mono font-bold text-white">{env?.temperature ?? 'Waiting for data...'}<span className="text-xs text-slate-500 ml-1">°C</span></p>
                     </div>
                     <div className="text-right">
                       <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Humidity</p>
-                      <p className="text-xl font-mono font-bold text-slate-300">{env?.humidity ?? '--'}<span className="text-xs text-slate-500 ml-1">%</span></p>
+                      <p className="text-xl font-mono font-bold text-slate-300">{env?.humidity ?? 'Waiting for data...'}<span className="text-xs text-slate-500 ml-1">%</span></p>
                     </div>
                   </div>
                   <div className={`p-2 rounded-lg border ${isGasDanger ? 'bg-red-500/10 border-red-500/20' : 'bg-slate-900/50 border-slate-800'}`}>
@@ -292,7 +340,7 @@ const App: React.FC = () => {
                       <StatusBadge status={isGasDanger ? 'Danger' : 'Safe'} />
                     </div>
                     <p className={`text-lg font-mono font-bold mt-1 ${isGasDanger ? 'text-red-500' : 'text-emerald-500'}`}>
-                      {env?.mq135_ppm ?? '--'} <span className="text-[10px] uppercase">ppm</span>
+                      {env?.mq135_ppm ?? 'Waiting for data...'} <span className="text-[10px] uppercase">ppm</span>
                     </p>
                   </div>
                 </div>
@@ -310,13 +358,13 @@ const App: React.FC = () => {
                     <div className="bg-slate-900/50 p-2 rounded-lg border border-slate-800">
                       <p className="text-[7px] font-black text-slate-500 uppercase mb-1">Heart Rate</p>
                       <p className="text-lg font-mono font-bold text-red-500 flex items-center gap-1">
-                        {vitals?.heart_rate ?? '--'} <span className="text-[8px] text-slate-600">BPM</span>
+                        {vitals?.heart_rate ?? 'Waiting for data...'} <span className="text-[8px] text-slate-600">BPM</span>
                       </p>
                     </div>
                     <div className="bg-slate-900/50 p-2 rounded-lg border border-slate-800">
                       <p className="text-[7px] font-black text-slate-500 uppercase mb-1">Breath Rate</p>
                       <p className="text-lg font-mono font-bold text-[#0ea5e9] flex items-center gap-1">
-                        {vitals?.breath_rate ?? '--'} <span className="text-[8px] text-slate-600">RPM</span>
+                        {vitals?.breath_rate ?? 'Waiting for data...'} <span className="text-[8px] text-slate-600">RPM</span>
                       </p>
                     </div>
                   </div>
@@ -327,10 +375,10 @@ const App: React.FC = () => {
                     </div>
                     <div className="flex justify-between items-center mt-1">
                       <p className="text-[9px] font-mono text-slate-400 flex items-center gap-1">
-                        <Navigation size={8} /> {vitals?.distance_m ?? '--'}m
+                        <Navigation size={8} /> {vitals?.distance_m ?? 'Waiting for data...'}m
                       </p>
                       <p className="text-[9px] font-mono text-slate-400">
-                        {vitals?.move_speed_cm ?? '--'} cm/s
+                        {vitals?.move_speed_cm ?? 'Waiting for data...'} cm/s
                       </p>
                     </div>
                   </div>
@@ -380,58 +428,72 @@ const App: React.FC = () => {
             {/* MIDDLE: Graphs */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <ChartContainer title="Environmental Telemetry (Temp & Gas)" icon={Thermometer}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={history}>
-                    <defs>
-                      <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
-                      </linearGradient>
-                      <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                    <XAxis 
-                      dataKey="time" 
-                      stroke="#4b5563" 
-                      fontSize={8} 
-                      tickLine={false} 
-                      axisLine={false}
-                      minTickGap={30}
-                    />
-                    <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
-                      itemStyle={{ padding: '2px 0' }}
-                    />
-                    <Area type="monotone" dataKey="temp" stroke="#0ea5e9" fillOpacity={1} fill="url(#colorTemp)" strokeWidth={2} name="Temp (°C)" isAnimationActive={false} />
-                    <Area type="monotone" dataKey="gas" stroke="#ef4444" fillOpacity={1} fill="url(#colorGas)" strokeWidth={2} name="Gas (ppm)" isAnimationActive={false} />
-                  </AreaChart>
-                </ResponsiveContainer>
+                {history.length < 2 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-slate-500 font-mono text-[10px] gap-2">
+                    <RefreshCw size={16} className="animate-spin" />
+                    COLLECTING TELEMETRY DATA ({history.length}/2)...
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
+                        </linearGradient>
+                        <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                      <XAxis 
+                        dataKey="time" 
+                        stroke="#4b5563" 
+                        fontSize={8} 
+                        tickLine={false} 
+                        axisLine={false}
+                        minTickGap={30}
+                      />
+                      <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
+                        itemStyle={{ padding: '2px 0' }}
+                      />
+                      <Area type="monotone" dataKey="temp" stroke="#0ea5e9" fillOpacity={1} fill="url(#colorTemp)" strokeWidth={2} name="Temp (°C)" isAnimationActive={false} />
+                      <Area type="monotone" dataKey="gas" stroke="#ef4444" fillOpacity={1} fill="url(#colorGas)" strokeWidth={2} name="Gas (ppm)" isAnimationActive={false} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
               </ChartContainer>
 
               <ChartContainer title="Human Vitals Telemetry (Heart & Breath)" icon={HeartPulse}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={history}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                    <XAxis 
-                      dataKey="time" 
-                      stroke="#4b5563" 
-                      fontSize={8} 
-                      tickLine={false} 
-                      axisLine={false}
-                      minTickGap={30}
-                    />
-                    <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
-                    />
-                    <Line type="monotone" dataKey="heart" stroke="#ef4444" strokeWidth={2} dot={false} name="Heart (BPM)" isAnimationActive={false} />
-                    <Line type="monotone" dataKey="breath" stroke="#10b981" strokeWidth={2} dot={false} name="Breath (RPM)" isAnimationActive={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                {history.length < 2 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-slate-500 font-mono text-[10px] gap-2">
+                    <RefreshCw size={16} className="animate-spin" />
+                    COLLECTING TELEMETRY DATA ({history.length}/2)...
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                      <XAxis 
+                        dataKey="time" 
+                        stroke="#4b5563" 
+                        fontSize={8} 
+                        tickLine={false} 
+                        axisLine={false}
+                        minTickGap={30}
+                      />
+                      <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
+                      />
+                      <Line type="monotone" dataKey="heart" stroke="#ef4444" strokeWidth={2} dot={false} name="Heart (BPM)" isAnimationActive={false} />
+                      <Line type="monotone" dataKey="breath" stroke="#10b981" strokeWidth={2} dot={false} name="Breath (RPM)" isAnimationActive={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
               </ChartContainer>
             </div>
 
@@ -521,25 +583,69 @@ const App: React.FC = () => {
         </div>
 
         {/* Footer */}
-        <footer className="mt-8 pt-6 border-t border-[#30363d] flex flex-col sm:flex-row justify-between items-center gap-4">
-          <div className="flex items-center gap-4">
-             <div className="flex items-center gap-2 text-slate-600">
-                <ShieldAlert size={12} />
-                <span className="text-[9px] font-bold uppercase tracking-widest">AeroLink Tactical Systems</span>
-             </div>
-             <span className="w-1 h-1 bg-slate-800 rounded-full"></span>
-             <p className="text-[9px] font-mono text-slate-500 uppercase">
-               System Ver: 4.2.0-STABLE
-             </p>
-          </div>
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></div>
-              <span className="text-[8px] font-black text-slate-600 uppercase tracking-widest">Backend Connected</span>
+        <footer className="mt-8 pt-6 border-t border-[#30363d] space-y-6">
+          <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 text-slate-600">
+                  <ShieldAlert size={12} />
+                  <span className="text-[9px] font-bold uppercase tracking-widest">AeroLink Tactical Systems</span>
+              </div>
+              <span className="w-1 h-1 bg-slate-800 rounded-full"></span>
+              <p className="text-[9px] font-mono text-slate-500 uppercase">
+                System Ver: 4.2.0-STABLE
+              </p>
             </div>
-            <p className="text-[8px] font-black text-slate-800 uppercase tracking-[0.4em]">
-              CONFIDENTIAL // INTERNAL USE ONLY
-            </p>
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-2">
+                <div className={`w-1.5 h-1.5 rounded-full ${syncError ? 'bg-red-500' : 'bg-emerald-500'}`}></div>
+                <span className="text-[8px] font-black text-slate-600 uppercase tracking-widest">
+                  {syncError ? 'Backend Disconnected' : 'Backend Connected'}
+                </span>
+              </div>
+              <p className="text-[8px] font-black text-slate-800 uppercase tracking-[0.4em]">
+                CONFIDENTIAL // INTERNAL USE ONLY
+              </p>
+            </div>
+          </div>
+
+          {/* Data Debugger Panel */}
+          <div className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Activity size={14} className="text-[#0ea5e9]" />
+                <h3 className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Telemetry Debugger</h3>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[8px] font-mono text-slate-600 uppercase">Buffer: {history.length}/20</span>
+                <span className={`text-[8px] font-mono uppercase ${syncError ? 'text-red-500' : 'text-emerald-500'}`}>
+                  {syncError ? 'Sync Error' : 'Sync OK'}
+                </span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800">
+                <p className="text-[7px] font-black text-slate-500 uppercase mb-2">Latest Raw Entry</p>
+                <div className="text-[9px] font-mono text-emerald-500/70 overflow-x-auto">
+                  {history.length > 0 ? (
+                    <pre>{JSON.stringify(history[history.length - 1], null, 2)}</pre>
+                  ) : (
+                    'Waiting for first data point...'
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800 flex flex-col justify-center">
+                  <p className="text-[7px] font-black text-slate-500 uppercase">History Count</p>
+                  <p className="text-xl font-mono font-bold text-white">{history.length}</p>
+                </div>
+                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800 flex flex-col justify-center">
+                  <p className="text-[7px] font-black text-slate-500 uppercase">Last Temp</p>
+                  <p className="text-xl font-mono font-bold text-[#0ea5e9]">
+                    {history.length > 0 ? history[history.length - 1].temp : '--'}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </footer>
       </div>
