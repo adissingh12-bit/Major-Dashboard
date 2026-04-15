@@ -70,6 +70,8 @@ interface LogEntry {
 
 // --- Components ---
 
+type NodeStatus = 'ACTIVE' | 'DELAYED' | 'OFFLINE';
+
 const StatusBadge = ({ status, type = 'default' }: { status: string, type?: 'default' | 'alert' }) => {
   const colors: Record<string, string> = {
     Authorized: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
@@ -99,7 +101,8 @@ const NodeCard = ({
   isAlert = false, 
   isHighlighted = false,
   timestamp,
-  nodeId
+  nodeId,
+  status = 'ACTIVE'
 }: { 
   title: string, 
   icon: any, 
@@ -107,37 +110,49 @@ const NodeCard = ({
   isAlert?: boolean,
   isHighlighted?: boolean,
   timestamp?: string,
-  nodeId: string
-}) => (
-  <div className={`bg-[#0d1117] border ${isAlert ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : isHighlighted ? 'border-[#0ea5e9] shadow-[0_0_15px_rgba(14,165,233,0.2)]' : 'border-[#30363d]'} rounded-2xl p-5 flex flex-col h-full transition-all relative overflow-hidden group`}>
-    {isAlert && <div className="absolute top-0 left-0 w-full h-1 bg-red-500 animate-pulse"></div>}
-    <div className="flex justify-between items-start mb-4">
-      <div className="flex items-center gap-3">
-        <div className={`w-10 h-10 rounded-xl ${isAlert ? 'bg-red-500/10 text-red-500' : isHighlighted ? 'bg-[#0ea5e9]/10 text-[#0ea5e9]' : 'bg-slate-900 text-slate-400'} flex items-center justify-center transition-transform`}>
-          <Icon size={20} />
-        </div>
-        <div>
-          <h3 className="text-sm font-bold text-white uppercase tracking-tight leading-tight">{title}</h3>
-          <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">{nodeId}</p>
-        </div>
-      </div>
-      <div className="flex flex-col items-end gap-1">
-        <span className="flex items-center gap-1 text-[8px] text-emerald-500 font-bold uppercase tracking-widest">
-          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
-          LIVE
-        </span>
-        {timestamp && (
-          <div className="flex items-center gap-1 text-slate-600 font-mono text-[8px]">
-            {new Date(timestamp).toLocaleTimeString()}
+  nodeId: string,
+  status?: NodeStatus
+}) => {
+  const isOffline = status === 'OFFLINE';
+  const isDelayed = status === 'DELAYED';
+
+  return (
+    <div className={`bg-[#0d1117] border ${isAlert && !isOffline ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : isHighlighted && !isOffline ? 'border-[#0ea5e9] shadow-[0_0_15px_rgba(14,165,233,0.2)]' : 'border-[#30363d]'} rounded-2xl p-5 flex flex-col h-full transition-all relative overflow-hidden group ${isOffline ? 'opacity-75' : ''}`}>
+      {isAlert && !isOffline && <div className="absolute top-0 left-0 w-full h-1 bg-red-500 animate-pulse"></div>}
+      <div className="flex justify-between items-start mb-4">
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl ${isOffline ? 'bg-slate-800 text-slate-600' : isAlert ? 'bg-red-500/10 text-red-500' : isHighlighted ? 'bg-[#0ea5e9]/10 text-[#0ea5e9]' : 'bg-slate-900 text-slate-400'} flex items-center justify-center transition-transform`}>
+            <Icon size={20} />
           </div>
-        )}
+          <div>
+            <h3 className="text-sm font-bold text-white uppercase tracking-tight leading-tight">{title}</h3>
+            <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">{nodeId}</p>
+          </div>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <span className={`flex items-center gap-1 text-[8px] font-bold uppercase tracking-widest ${isOffline ? 'text-red-500' : isDelayed ? 'text-amber-500' : 'text-emerald-500'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${isOffline ? 'bg-red-500' : isDelayed ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'}`}></span>
+            {status}
+          </span>
+          {timestamp && (
+            <div className="flex items-center gap-1 text-slate-600 font-mono text-[8px]">
+              {new Date(timestamp).toLocaleTimeString()}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className={`flex-1 ${isOffline ? 'grayscale contrast-75' : ''}`}>
+        {isOffline ? (
+          <div className="h-full flex flex-col items-center justify-center text-center space-y-2 py-4">
+            <RefreshCw size={24} className="text-slate-700 animate-spin-slow" />
+            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Waiting for Data...</p>
+            <p className="text-[8px] font-mono text-slate-600 uppercase">Node Offline</p>
+          </div>
+        ) : children}
       </div>
     </div>
-    <div className="flex-1">
-      {children}
-    </div>
-  </div>
-);
+  );
+};
 
 const ChartContainer = ({ title, children, icon: Icon }: { title: string, children: React.ReactNode, icon?: any }) => (
   <div className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 h-[280px] flex flex-col">
@@ -163,6 +178,20 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [lastSync, setLastSync] = useState<Date | null>(null);
   const [syncError, setSyncError] = useState(false);
+  const [now, setNow] = useState(Date.now());
+
+  // Freshness check logic
+  const getNodeStatus = (timestamp?: string): NodeStatus => {
+    if (!timestamp) return 'OFFLINE';
+    const diff = (now - new Date(timestamp).getTime()) / 1000;
+    if (diff < 10) return 'ACTIVE';
+    if (diff < 30) return 'DELAYED';
+    return 'OFFLINE';
+  };
+
+  const envStatus = getNodeStatus(env?.timestamp);
+  const vitalsStatus = getNodeStatus(vitals?.timestamp);
+  const rfidStatus = getNodeStatus(rfid?.timestamp);
   
   const fetchData = async () => {
     console.log("--- FETCHING TELEMETRY ---");
@@ -227,9 +256,18 @@ const App: React.FC = () => {
       if (latestVitals) setVitals(latestVitals);
       if (latestRFID) setRfid(latestRFID);
       
+      // Update current time for freshness check
+      setNow(Date.now());
+      
       // 3. Ensure history state is ALWAYS updated (even with partial data)
       // 4. Force numeric values
       setHistory(prev => {
+        // Stop updating graph if node is OFFLINE
+        const eStatus = getNodeStatus(latestEnv?.timestamp);
+        const vStatus = getNodeStatus(latestVitals?.timestamp);
+
+        if (eStatus === 'OFFLINE' && vStatus === 'OFFLINE') return prev;
+
         const parseNum = (val: any, fallback: number) => {
           const n = Number(val);
           return isNaN(n) ? fallback : n;
@@ -237,10 +275,10 @@ const App: React.FC = () => {
 
         const newPoint: HistoryPoint = {
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          temp: latestEnv ? parseNum(latestEnv.temperature, (prev.length > 0 ? prev[prev.length - 1].temp : 0)) : (prev.length > 0 ? prev[prev.length - 1].temp : 0),
-          gas: latestEnv ? parseNum(latestEnv.mq135_ppm, (prev.length > 0 ? prev[prev.length - 1].gas : 0)) : (prev.length > 0 ? prev[prev.length - 1].gas : 0),
-          heart: latestVitals ? parseNum(latestVitals.heart_rate, (prev.length > 0 ? prev[prev.length - 1].heart : 0)) : (prev.length > 0 ? prev[prev.length - 1].heart : 0),
-          breath: latestVitals ? parseNum(latestVitals.breath_rate, (prev.length > 0 ? prev[prev.length - 1].breath : 0)) : (prev.length > 0 ? prev[prev.length - 1].breath : 0)
+          temp: latestEnv && eStatus !== 'OFFLINE' ? parseNum(latestEnv.temperature, (prev.length > 0 ? prev[prev.length - 1].temp : 0)) : (prev.length > 0 ? prev[prev.length - 1].temp : 0),
+          gas: latestEnv && eStatus !== 'OFFLINE' ? parseNum(latestEnv.mq135_ppm, (prev.length > 0 ? prev[prev.length - 1].gas : 0)) : (prev.length > 0 ? prev[prev.length - 1].gas : 0),
+          heart: latestVitals && vStatus !== 'OFFLINE' ? parseNum(latestVitals.heart_rate, (prev.length > 0 ? prev[prev.length - 1].heart : 0)) : (prev.length > 0 ? prev[prev.length - 1].heart : 0),
+          breath: latestVitals && vStatus !== 'OFFLINE' ? parseNum(latestVitals.breath_rate, (prev.length > 0 ? prev[prev.length - 1].breath : 0)) : (prev.length > 0 ? prev[prev.length - 1].breath : 0)
         };
         const updated = [...prev, newPoint].slice(-20);
         console.log("HISTORY UPDATED, COUNT:", updated.length, "LATEST:", newPoint);
@@ -348,8 +386,9 @@ const App: React.FC = () => {
                 title="Environmental Monitoring Unit" 
                 nodeId="NODE-01"
                 icon={Thermometer} 
-                isAlert={isGasDanger}
+                isAlert={isGasDanger && envStatus !== 'OFFLINE'}
                 timestamp={env?.timestamp}
+                status={envStatus}
               >
                 <div className="space-y-3">
                   <div className="flex justify-between items-end">
@@ -378,8 +417,9 @@ const App: React.FC = () => {
                 title="Human Vitals Detection Unit" 
                 nodeId="NODE-02"
                 icon={HeartPulse} 
-                isHighlighted={isHumanDetected}
+                isHighlighted={isHumanDetected && vitalsStatus !== 'OFFLINE'}
                 timestamp={vitals?.timestamp}
+                status={vitalsStatus}
               >
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-2">
@@ -417,15 +457,18 @@ const App: React.FC = () => {
                 title="RFID Access Control Unit" 
                 nodeId="NODE-03"
                 icon={Tag} 
-                isAlert={rfid?.access === 'DENIED'}
-                isHighlighted={rfid?.access === 'GRANTED'}
+                isAlert={rfid?.access === 'DENIED' && rfidStatus !== 'OFFLINE'}
+                isHighlighted={rfid?.access === 'GRANTED' && rfidStatus !== 'OFFLINE'}
                 timestamp={rfid?.timestamp}
+                status={rfidStatus}
               >
                 <div className="space-y-3">
-                  {!rfid ? (
+                  {!rfid || rfidStatus === 'OFFLINE' ? (
                     <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800 flex flex-col items-center justify-center h-[90px] text-center">
                       <Lock size={20} className="text-slate-700 mb-2" />
-                      <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Waiting for RFID scan...</p>
+                      <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+                        {rfidStatus === 'OFFLINE' ? 'NO RECENT SCAN' : 'Waiting for RFID scan...'}
+                      </p>
                     </div>
                   ) : (
                     <div className={`p-3 rounded-xl border flex flex-col items-center justify-center h-[90px] text-center transition-all ${
@@ -446,7 +489,7 @@ const App: React.FC = () => {
                   )}
                   <div className="flex justify-between items-center px-1">
                     <span className="text-[8px] font-black text-slate-600 uppercase">Last Status</span>
-                    <StatusBadge status={rfid ? (rfid.access === 'GRANTED' ? 'Authorized' : 'Denied') : 'Clear'} />
+                    <StatusBadge status={rfid && rfidStatus !== 'OFFLINE' ? (rfid.access === 'GRANTED' ? 'Authorized' : 'Denied') : 'Clear'} />
                   </div>
                 </div>
               </NodeCard>
@@ -483,36 +526,45 @@ const App: React.FC = () => {
                     COLLECTING TELEMETRY DATA ({history.length}/2)...
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <defs>
-                        <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
-                        </linearGradient>
-                        <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                      <XAxis 
-                        dataKey="time" 
-                        stroke="#4b5563" 
-                        fontSize={8} 
-                        tickLine={false} 
-                        axisLine={false}
-                        minTickGap={30}
-                      />
-                      <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
-                        itemStyle={{ padding: '2px 0' }}
-                      />
-                      <Area type="monotone" dataKey="temp" stroke="#0ea5e9" fillOpacity={1} fill="url(#colorTemp)" strokeWidth={2} name="Temp (°C)" isAnimationActive={false} />
-                      <Area type="monotone" dataKey="gas" stroke="#ef4444" fillOpacity={1} fill="url(#colorGas)" strokeWidth={2} name="Gas (ppm)" isAnimationActive={false} />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  <div className={`w-full h-full transition-opacity duration-500 ${envStatus === 'OFFLINE' ? 'opacity-30 grayscale' : 'opacity-100'}`}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
+                          </linearGradient>
+                          <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                        <XAxis 
+                          dataKey="time" 
+                          stroke="#4b5563" 
+                          fontSize={8} 
+                          tickLine={false} 
+                          axisLine={false}
+                          minTickGap={30}
+                        />
+                        <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
+                          itemStyle={{ padding: '2px 0' }}
+                        />
+                        <Area type="monotone" dataKey="temp" stroke="#0ea5e9" fillOpacity={1} fill="url(#colorTemp)" strokeWidth={2} name="Temp (°C)" isAnimationActive={false} />
+                        <Area type="monotone" dataKey="gas" stroke="#ef4444" fillOpacity={1} fill="url(#colorGas)" strokeWidth={2} name="Gas (ppm)" isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                    {envStatus === 'OFFLINE' && (
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <span className="bg-slate-900/80 border border-slate-700 px-3 py-1 rounded-full text-[8px] font-black text-slate-400 uppercase tracking-widest">
+                          Sensor Offline - Data Paused
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 )}
               </ChartContainer>
 
@@ -523,25 +575,34 @@ const App: React.FC = () => {
                     COLLECTING TELEMETRY DATA ({history.length}/2)...
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                      <XAxis 
-                        dataKey="time" 
-                        stroke="#4b5563" 
-                        fontSize={8} 
-                        tickLine={false} 
-                        axisLine={false}
-                        minTickGap={30}
-                      />
-                      <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
-                      />
-                      <Line type="monotone" dataKey="heart" stroke="#ef4444" strokeWidth={2} dot={false} name="Heart (BPM)" isAnimationActive={false} />
-                      <Line type="monotone" dataKey="breath" stroke="#10b981" strokeWidth={2} dot={false} name="Breath (RPM)" isAnimationActive={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  <div className={`w-full h-full transition-opacity duration-500 ${vitalsStatus === 'OFFLINE' ? 'opacity-30 grayscale' : 'opacity-100'}`}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                        <XAxis 
+                          dataKey="time" 
+                          stroke="#4b5563" 
+                          fontSize={8} 
+                          tickLine={false} 
+                          axisLine={false}
+                          minTickGap={30}
+                        />
+                        <YAxis stroke="#4b5563" fontSize={8} tickLine={false} axisLine={false} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#0d1117', border: '1px solid #30363d', borderRadius: '8px', fontSize: '10px' }}
+                        />
+                        <Line type="monotone" dataKey="heart" stroke="#ef4444" strokeWidth={2} dot={false} name="Heart (BPM)" isAnimationActive={false} />
+                        <Line type="monotone" dataKey="breath" stroke="#10b981" strokeWidth={2} dot={false} name="Breath (RPM)" isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                    {vitalsStatus === 'OFFLINE' && (
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <span className="bg-slate-900/80 border border-slate-700 px-3 py-1 rounded-full text-[8px] font-black text-slate-400 uppercase tracking-widest">
+                          Sensor Offline - Data Paused
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 )}
               </ChartContainer>
             </div>
@@ -712,6 +773,13 @@ const App: React.FC = () => {
         }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
           background: #0ea5e9;
+        }
+        @keyframes spin-slow {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+          animation: spin-slow 3s linear infinite;
         }
       `}</style>
     </div>
