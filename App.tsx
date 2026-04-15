@@ -44,6 +44,14 @@ interface VitalsData {
   timestamp: string;
 }
 
+interface RFIDData {
+  node_id: string;
+  room: string;
+  uid: string;
+  access: 'GRANTED' | 'DENIED';
+  timestamp: string;
+}
+
 interface HistoryPoint {
   time: string;
   temp: number;
@@ -149,6 +157,7 @@ const ChartContainer = ({ title, children, icon: Icon }: { title: string, childr
 const App: React.FC = () => {
   const [env, setEnv] = useState<EnvironmentData | null>(null);
   const [vitals, setVitals] = useState<VitalsData | null>(null);
+  const [rfid, setRfid] = useState<RFIDData | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -160,13 +169,15 @@ const App: React.FC = () => {
     try {
       setSyncError(false);
       // 1. Handle APIs independently (Remove all-or-nothing failure)
-      const [envRes, vitalsRes] = await Promise.allSettled([
+      const [envRes, vitalsRes, rfidRes] = await Promise.allSettled([
         fetch(`${BASE_URL}/api/environment`),
-        fetch(`${BASE_URL}/api/vitals`)
+        fetch(`${BASE_URL}/api/vitals`),
+        fetch(`${BASE_URL}/api/rfid`)
       ]);
 
       let envJson: any = null;
       let vitalsJson: any = null;
+      let rfidJson: any = null;
 
       if (envRes.status === 'fulfilled' && envRes.value.ok) {
         try {
@@ -188,19 +199,33 @@ const App: React.FC = () => {
         console.warn("Vitals API failed or returned error", vitalsRes);
       }
 
+      if (rfidRes.status === 'fulfilled' && rfidRes.value.ok) {
+        try {
+          rfidJson = await rfidRes.value.json();
+        } catch (e) {
+          console.error("Failed to parse RFID JSON:", e);
+        }
+      } else {
+        console.warn("RFID API failed or returned error", rfidRes);
+      }
+
       // 2. Handle Array vs Object response (CRITICAL)
       const envData = envJson ? (Array.isArray(envJson) ? envJson : [envJson]) : [];
       const vitalsData = vitalsJson ? (Array.isArray(vitalsJson) ? vitalsJson : [vitalsJson]) : [];
+      const rfidData = rfidJson ? (Array.isArray(rfidJson) ? rfidJson : [rfidJson]) : [];
 
       // 5. Debug Logs
       console.log("ENV DATA:", envData);
       console.log("VITALS DATA:", vitalsData);
+      console.log("RFID DATA:", rfidData);
 
       const latestEnv = envData.length > 0 ? envData[0] : null;
       const latestVitals = vitalsData.length > 0 ? vitalsData[0] : null;
+      const latestRFID = rfidData.length > 0 ? rfidData[0] : null;
 
       if (latestEnv) setEnv(latestEnv);
       if (latestVitals) setVitals(latestVitals);
+      if (latestRFID) setRfid(latestRFID);
       
       // 3. Ensure history state is ALWAYS updated (even with partial data)
       // 4. Force numeric values
@@ -228,6 +253,9 @@ const App: React.FC = () => {
       }
       if (latestVitals && Number(latestVitals.human_detected) === 1) {
         addLog('SYSTEM', 'Human presence detected in restricted zone', 'warning');
+      }
+      if (latestRFID && latestRFID.access === 'DENIED') {
+        addLog('ALERT', `Unauthorized access attempt: UID ${latestRFID.uid}`, 'danger');
       }
     } catch (error) {
       console.error("Telemetry Sync Error:", error);
@@ -389,15 +417,36 @@ const App: React.FC = () => {
                 title="RFID Access Control Unit" 
                 nodeId="NODE-03"
                 icon={Tag} 
+                isAlert={rfid?.access === 'DENIED'}
+                isHighlighted={rfid?.access === 'GRANTED'}
+                timestamp={rfid?.timestamp}
               >
                 <div className="space-y-3">
-                  <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800 flex flex-col items-center justify-center h-[90px] text-center">
-                    <Lock size={20} className="text-slate-700 mb-2" />
-                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Waiting for Scan</p>
-                  </div>
+                  {!rfid ? (
+                    <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800 flex flex-col items-center justify-center h-[90px] text-center">
+                      <Lock size={20} className="text-slate-700 mb-2" />
+                      <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Waiting for RFID scan...</p>
+                    </div>
+                  ) : (
+                    <div className={`p-3 rounded-xl border flex flex-col items-center justify-center h-[90px] text-center transition-all ${
+                      rfid.access === 'GRANTED' ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20 animate-pulse'
+                    }`}>
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center mb-1 ${
+                        rfid.access === 'GRANTED' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-red-500/20 text-red-500'
+                      }`}>
+                        {rfid.access === 'GRANTED' ? <Zap size={16} /> : <Lock size={16} />}
+                      </div>
+                      <p className="text-[10px] font-mono font-bold text-white tracking-widest uppercase">{rfid.uid}</p>
+                      <p className={`text-[8px] font-black uppercase tracking-[0.2em] mt-1 ${
+                        rfid.access === 'GRANTED' ? 'text-emerald-500' : 'text-red-500'
+                      }`}>
+                        {rfid.access === 'GRANTED' ? 'ACCESS_GRANTED' : 'ACCESS_DENIED'}
+                      </p>
+                    </div>
+                  )}
                   <div className="flex justify-between items-center px-1">
                     <span className="text-[8px] font-black text-slate-600 uppercase">Last Status</span>
-                    <span className="text-[8px] font-mono text-slate-600">--:--:--</span>
+                    <StatusBadge status={rfid ? (rfid.access === 'GRANTED' ? 'Authorized' : 'Denied') : 'Clear'} />
                   </div>
                 </div>
               </NodeCard>
