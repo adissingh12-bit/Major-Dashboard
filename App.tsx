@@ -181,17 +181,44 @@ const App: React.FC = () => {
   const [now, setNow] = useState(Date.now());
 
   // Freshness check logic
-  const getNodeStatus = (timestamp?: string): NodeStatus => {
+  const getNodeStatus = (timestamp?: string, nodeId?: string): NodeStatus => {
     if (!timestamp) return 'OFFLINE';
-    const diff = (now - new Date(timestamp).getTime()) / 1000;
-    if (diff < 10) return 'ACTIVE';
-    if (diff < 30) return 'DELAYED';
-    return 'OFFLINE';
+    
+    let parsedDate: Date;
+    try {
+      // YYYY-MM-DD HH:mm:ss -> YYYY-MM-DDTHH:mm:ssZ (Forces UTC for SQLite timestamps)
+      const isoFormat = timestamp.replace(" ", "T") + "Z";
+      parsedDate = new Date(isoFormat);
+      
+      // Fallback if parsing fails (NaN check)
+      if (isNaN(parsedDate.getTime())) {
+        console.warn(`[${nodeId || 'UNKNOWN'}] Invalid timestamp format: ${timestamp}`);
+        return 'ACTIVE'; 
+      }
+    } catch (e) {
+      console.error(`[${nodeId || 'UNKNOWN'}] Timestamp parse error:`, e);
+      return 'ACTIVE';
+    }
+
+    const diffSeconds = (now - parsedDate.getTime()) / 1000;
+    const statusResult = diffSeconds < 30 ? 'ACTIVE' : (diffSeconds < 120 ? 'DELAYED' : 'OFFLINE');
+
+    // Requirement 6: Detailed console logs
+    if (nodeId) {
+      console.log(`[${nodeId}] SYNC_CHECK:`, {
+        raw: timestamp,
+        parsed: parsedDate.toISOString(),
+        secondsDiff: Math.floor(diffSeconds),
+        status: statusResult
+      });
+    }
+
+    return statusResult;
   };
 
-  const envStatus = getNodeStatus(env?.timestamp);
-  const vitalsStatus = getNodeStatus(vitals?.timestamp);
-  const rfidStatus = getNodeStatus(rfid?.timestamp);
+  const envStatus = getNodeStatus(env?.timestamp, 'NODE-01');
+  const vitalsStatus = getNodeStatus(vitals?.timestamp, 'NODE-02');
+  const rfidStatus = getNodeStatus(rfid?.timestamp, 'NODE-03');
   
   const fetchData = async () => {
     console.log("--- FETCHING TELEMETRY ---");
@@ -263,8 +290,8 @@ const App: React.FC = () => {
       // 4. Force numeric values
       setHistory(prev => {
         // Stop updating graph if node is OFFLINE
-        const eStatus = getNodeStatus(latestEnv?.timestamp);
-        const vStatus = getNodeStatus(latestVitals?.timestamp);
+        const eStatus = getNodeStatus(latestEnv?.timestamp, 'NODE-01-GRAPH');
+        const vStatus = getNodeStatus(latestVitals?.timestamp, 'NODE-02-GRAPH');
 
         if (eStatus === 'OFFLINE' && vStatus === 'OFFLINE') return prev;
 
